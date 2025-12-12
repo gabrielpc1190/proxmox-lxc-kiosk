@@ -1,0 +1,21 @@
+#!/bin/bash
+xset s off
+xset -dpms
+xset s noblank
+
+# Start DBus session for Chromium (Crucial for avoiding crashes)
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+    eval $(dbus-launch --sh-syntax --exit-with-session)
+fi
+
+openbox-session &
+while true; do
+  # Adjust window size and position as needed. 
+  # Note: --kiosk flag forces fullscreen regardless of window-size usually.
+  chromium --kiosk --no-sandbox --test-type --ignore-gpu-blocklist \
+    --enable-gpu-rasterization --enable-zero-copy --disable-infobars \
+    --window-position=0,0 --window-size=1920,1080 \
+    --check-for-update-interval=31536000 \
+    https://ha.soporte101.com
+  sleep 5
+done
