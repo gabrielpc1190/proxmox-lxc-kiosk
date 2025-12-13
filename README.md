@@ -2,6 +2,31 @@
 
 This guide documents the successful configuration of an unprivileged LXC container acting as a Kiosk (Chromium) displaying on an external monitor via an Intel iGPU.
 
+## 🚀 Quick Automated Installation
+
+We provide an interactive script `install.sh` that automates 99% of the process (Detection, Creation, Configuration).
+
+1. Clone this repo on your **Proxmox Host**:
+   ```bash
+   git clone https://github.com/gabrielpc1190/proxmox-lxc-kiosk.git
+   cd proxmox-lxc-kiosk
+   ```
+2. Make the script executable and run it:
+   ```bash
+   chmod +x install.sh
+   ./install.sh
+   ```
+3. Follow the prompts (Container ID, Password, URL). The script will:
+   - Create a Debian 12 container.
+   - Configure GPU/Input passthrough automatically.
+   - Install all dependencies.
+   - Setup Host persistence.
+
+---
+
+## Manual Installation Guide
+If you prefer to do it step-by-step or debug an existing install, follow below.
+
 ## 1. Host Preparation (Proxmox)
 
 ### GRUB Configuration
