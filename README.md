@@ -200,5 +200,21 @@ WantedBy=multi-user.target
 - **Cause:** Xorg defaults to asking `udev` for devices, but `udev` is broken in LXC.
 - **Fix:** Create `10-input.conf` with `AutoAddDevices` "False" and manually define inputs using `evdev` driver (see Static Input Configuration).
 
-### 5. Chromium "FATAL: D-Bus connection was disconnected"
-- **Fix:** Install `dbus-x11` and wrap the session in `.xinitrc` with `eval $(dbus-launch ...)`.
+## 🔄 Migration & Hardware Changes
+
+If you move this container to a new Proxmox host or change hardware, you **must** check two things:
+
+### 1. Input Device IDs (`eventX`)
+Linux assigns `/dev/input/eventX` numbers dynamically based on what is plugged in.
+- **Symptom:** Keyboard/Mouse stops working after reboot or migration.
+- **Fix:**
+  1. Check new IDs: `ls -l /dev/input/by-id/`
+  2. Update `/etc/X11/xorg.conf.d/10-input.conf` with the new event number (e.g., change `event3` to `event4`).
+
+### 2. Network Interface (`eth0`)
+Proxmox might rename the container's network interface config if the host bridge changes.
+- **Fix:** Check `/etc/pve/lxc/CTID.conf` and ensure `net0` is using the correct bridge (usually `vmbr0`) and interface type.
+
+### 3. Multiple Monitors / Touchscreens
+- **Grey Screen on 2nd Monitor:** Openbox defaults to the primary screen. Use `xrandr` in `.xinitrc` to mirror or extend displays.
+- **Touch Not Working:** You must add a new `InputDevice` section in `10-input.conf` for the touchscreen's event ID (find it via `by-id` or `grep` in `/sys/class/input/`).
