@@ -4,9 +4,23 @@ This guide documents the successful configuration of an unprivileged LXC contain
 
 ## 🚀 Quick Automated Installation
 
-We provide an interactive script `install.sh` that automates 99% of the process (Detection, Creation, Configuration).
+## Características Destacadas
+*   **Auto-Detección de Hardware de Entrada:** El script de instalación (`detect_inputs.sh`) escanea `/proc/bus/input/devices` y configura automáticamente:
+    *   Teclados y Ratones USB (usando identificadores persistentes `by-id` y modo exclusivo `GrabDevice`).
+    *   Pantallas Táctiles (con mapeo automático a la pantalla integrada).
+    *   Genera un `ServerLayout` explícito para garantizar que Xorg cargue todos los dispositivos.
+*   **Video Dual Extendido:** Detecta automáticamente si hay HDMI y DSI conectados, configurando:
+    *   HDMI como pantalla Principal (1920x1080).
+    *   DSI como pantalla Secundaria Extendida (a la derecha).
+*   **Doble Instancia de Kiosko:** Lanza dos ventanas independientes de Chromium, una para cada monitor, con sus propios perfiles de datos para evitar bloqueos.
+*   **Aceleración:** Configurado para Intel Graphics (aunque en contenedores sin privilegios puede requerir ajustes finos, funciona por software fallback robusto).
 
-1. Clone this repo on your **Proxmox Host**:
+## Instalación Rápida
+```bash
+./install.sh
+```
+El script pedirá el ID del contenedor (ej. 202) y la URL del Kiosko.
+Todo lo demás (drivers, inputs, display) es automático. **Proxmox Host**:
    ```bash
    git clone https://github.com/gabrielpc1190/proxmox-lxc-kiosk.git
    cd proxmox-lxc-kiosk
@@ -87,7 +101,7 @@ lxc.mount.entry: /dev/tty0 dev/tty0 none bind,optional,create=file
 ### Install Packages
 ```bash
 apt update
-apt install -y --no-install-recommends xorg openbox chromium chromium-l10n xserver-xorg-input-libinput xserver-xorg-input-evdev
+apt install -y --no-install-recommends xorg openbox chromium chromium-l10n xserver-xorg-input-libinput xserver-xorg-input-evdev xserver-xorg-video-intel
 ```
 
 ### Persistent Host Permissions (Critical)

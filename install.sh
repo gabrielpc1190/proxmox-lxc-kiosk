@@ -11,18 +11,20 @@ echo -e "${CYAN}=== Proxmox LXC Kiosk Installer ===${NC}"
 echo "This script will create a new unprivileged LXC container configured for Intel GPU Passthrough and Kiosk mode."
 echo ""
 
-# 1. Inputs
-read -p "Enter Container ID (e.g., 203): " CTID
-read -s -p "Enter Root Password: " PASSWORD
-echo ""
-read -p "Enter Kiosk URL (default: https://ha.soporte101.com): " KIOSK_URL
-KIOSK_URL=${KIOSK_URL:-"https://ha.soporte101.com"}
+# 1. Inputs HARDCODED for Automation
+CTID=202
+PASSWORD="cd970fc1c5"
+KIOSK_URL="https://ha.soporte101.com"
 
-# Check if CTID exists
+# Check if CTID exists (and destroy if it does, since we are recreating)
 if pct status $CTID &>/dev/null; then
-  echo -e "${RED}Error: Container $CTID already exists.${NC}"
-  exit 1
+  echo -e "${CYAN}Container $CTID exists. Destroying it to recreate...${NC}"
+  pct stop $CTID || true
+  pct destroy $CTID
 fi
+
+# Hardcoded template path based on 'pveam list local'
+TEMPLATE_PATH="local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst"
 
 # 2. Detect Host GIDs
 echo -e "\n${GREEN}--> Detecting Host GIDs...${NC}"
@@ -41,7 +43,7 @@ fi
 # 3. Create Container
 echo -e "\n${GREEN}--> Creating Container $CTID (Debian 12)...${NC}"
 # Note: Assuming debian-12-standard template is available. Adjust storage 'local-lvm' if needed.
-pct create $CTID local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst \
+pct create $CTID $TEMPLATE_PATH \
     --rootfs local-lvm:8 \
     --hostname kiosk-$CTID \
     --cores 2 --memory 2048 --swap 512 \
@@ -102,7 +104,7 @@ sleep 10
 # 6. Install Dependencies
 echo -e "\n${GREEN}--> Installing Kiosk Packages (this may take a while)...${NC}"
 pct exec $CTID -- apt update
-pct exec $CTID -- apt install -y --no-install-recommends xorg openbox chromium chromium-l10n xserver-xorg-input-libinput xserver-xorg-input-evdev dbus-x11
+pct exec $CTID -- bash -c "DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends xorg openbox chromium chromium-l10n xserver-xorg-input-libinput xserver-xorg-input-evdev dbus-x11 xserver-xorg-video-intel"
 
 # 7. Push Config Files (from local files in same dir as script)
 echo -e "\n${GREEN}--> Configuring Xorg & Systemd...${NC}"
@@ -111,25 +113,91 @@ DIR="$(dirname "$0")"
 # Push using 'cat' to avoid depending on local file existence if user runs script standalone
 # We recreate the known clean configs here safely
 
-# 10-input.conf
-cat <<EOF | pct exec $CTID -- tee /etc/X11/xorg.conf.d/10-input.conf >/dev/null
-Section "ServerFlags"
-    Option "AutoAddDevices" "False"
-EndSection
+# 10-input.conf (AUTO_DETECTION IMPROVED V4 - Grab + By-ID + Core)
+cat <<'EOF' | pct exec $CTID -- tee /usr/local/bin/detect_inputs.sh >/dev/null
+#!/bin/bash
+OUTPUT="/etc/X11/xorg.conf.d/10-input.conf"
+echo 'Section "ServerFlags"' > $OUTPUT
+echo '    Option "AutoAddDevices" "False"' >> $OUTPUT
+echo 'EndSection' >> $OUTPUT
 
-Section "InputDevice"
-    Identifier "Keyboard0"
-    Driver "evdev"
-    Option "Device" "/dev/input/event3"
-    Option "XkbLayout" "us"
-EndSection
+CORE_KBD_SET=0
+CORE_PTR_SET=0
 
-Section "InputDevice"
-    Identifier "Mouse0"
-    Driver "evdev"
-    Option "Device" "/dev/input/event3"
-EndSection
+CURRENT_NAME=""
+while read -r line; do
+    if [[ "$line" =~ ^N:\ Name=\"(.*)\" ]]; then
+        CURRENT_NAME="${BASH_REMATCH[1]}"
+    fi
+    if [[ "$line" =~ ^H:\ Handlers=(.*) ]]; then
+        HANDLERS="${BASH_REMATCH[1]}"
+        if [[ "$CURRENT_NAME" =~ "Button" ]] || [[ "$CURRENT_NAME" =~ "Speaker" ]] || [[ "$CURRENT_NAME" =~ "Bus" ]] || [[ "$CURRENT_NAME" =~ "Intel HID" ]]; then
+           continue
+        fi
+        
+        # Regex to capture ONLY number
+        if [[ "$HANDLERS" =~ event([0-9]+) ]]; then
+            EVENT_NUM="${BASH_REMATCH[1]}"
+            EVENT_ID="event${EVENT_NUM}"
+            
+            # Resolve to by-id alias
+            BY_ID_PATH=$(find /dev/input/by-id -lname "*${EVENT_ID}" 2>/dev/null | head -n 1)
+            DEVICE_PATH="${BY_ID_PATH:-/dev/input/${EVENT_ID}}"
+            IS_TOUCH=0
+
+            # 1. Touchscreen
+            if [[ "$CURRENT_NAME" =~ "Touch" ]] || [[ "$CURRENT_NAME" =~ "touch" ]]; then
+               echo "" >> $OUTPUT
+               echo "Section \"InputDevice\"" >> $OUTPUT
+               echo "    Identifier \"Touch_${EVENT_ID}\"" >> $OUTPUT
+               echo "    Driver \"evdev\"" >> $OUTPUT
+               echo "    Option \"Device\" \"$DEVICE_PATH\"" >> $OUTPUT
+               echo "    Option \"GrabDevice\" \"True\"" >> $OUTPUT
+               echo "    Option \"SendCoreEvents\" \"True\"" >> $OUTPUT
+               echo "EndSection" >> $OUTPUT
+               IS_TOUCH=1
+            fi
+
+            # 2. Keyboard
+            if [[ "$HANDLERS" =~ "kbd" ]]; then
+               echo "" >> $OUTPUT
+               echo "Section \"InputDevice\"" >> $OUTPUT
+               echo "    Identifier \"Keyboard_${EVENT_ID}\"" >> $OUTPUT
+               echo "    Driver \"evdev\"" >> $OUTPUT
+               echo "    Option \"Device\" \"$DEVICE_PATH\"" >> $OUTPUT
+               echo "    Option \"XkbLayout\" \"us\"" >> $OUTPUT
+               echo "    Option \"GrabDevice\" \"True\"" >> $OUTPUT
+               if [ $CORE_KBD_SET -eq 0 ]; then
+                   echo "    Option \"CoreKeyboard\"" >> $OUTPUT
+                   CORE_KBD_SET=1
+               else
+                   echo "    Option \"SendCoreEvents\" \"True\"" >> $OUTPUT
+               fi
+               echo "EndSection" >> $OUTPUT
+            fi
+
+            # 3. Mouse
+            if [[ "$HANDLERS" =~ "mouse" ]] && [ $IS_TOUCH -eq 0 ]; then
+               echo "" >> $OUTPUT
+               echo "Section \"InputDevice\"" >> $OUTPUT
+               echo "    Identifier \"Mouse_${EVENT_ID}\"" >> $OUTPUT
+               echo "    Driver \"evdev\"" >> $OUTPUT
+               echo "    Option \"Device\" \"$DEVICE_PATH\"" >> $OUTPUT
+               echo "    Option \"GrabDevice\" \"True\"" >> $OUTPUT
+               if [ $CORE_PTR_SET -eq 0 ]; then
+                   echo "    Option \"CorePointer\"" >> $OUTPUT
+                   CORE_PTR_SET=1
+               else
+                   echo "    Option \"SendCoreEvents\" \"True\"" >> $OUTPUT
+               fi
+               echo "EndSection" >> $OUTPUT
+            fi
+        fi
+    fi
+done < /proc/bus/input/devices
 EOF
+pct exec $CTID -- chmod +x /usr/local/bin/detect_inputs.sh
+pct exec $CTID -- /usr/local/bin/detect_inputs.sh
 
 # 20-intel.conf
 cat <<EOF | pct exec $CTID -- tee /etc/X11/xorg.conf.d/20-intel.conf >/dev/null
@@ -147,17 +215,48 @@ xset s off
 xset -dpms
 xset s noblank
 
-if [ -z "\$DBUS_SESSION_BUS_ADDRESS" ]; then
-    eval \$(dbus-launch --sh-syntax --exit-with-session)
+# Auto-configure generic dual EXTENDED if HDMI+DSI present
+xrandr --output HDMI1 --auto --primary --output DSI1 --auto --right-of HDMI1 2>/dev/null || true
+
+# Fix Touchscreen mapping to DSI1 (Integrated screen)
+# Wait a bit for X to settle inputs or just run it. xinput should be ready.
+# We grep for our generated Identifier "Touch_eventX"
+TOUCH_DEV=$(xinput list --name-only 2>/dev/null | grep "Touch_" | head -n 1)
+if [ ! -z "$TOUCH_DEV" ]; then
+    xinput map-to-output "$TOUCH_DEV" DSI1 2>/dev/null || true
+fi
+
+# Start DBus session
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+    eval $(dbus-launch --sh-syntax --exit-with-session)
 fi
 
 openbox-session &
+
+# Clean legacy locks
+rm -rf /root/.config/chromium/Singleton*
+rm -rf /root/.config/chromium-dsi/Singleton*
+
 while true; do
+  # Instance 1: HDMI (Primary 1920x1080)
   chromium --kiosk --no-sandbox --test-type --ignore-gpu-blocklist \
     --enable-gpu-rasterization --enable-zero-copy --disable-infobars \
     --window-position=0,0 --window-size=1920,1080 \
     --check-for-update-interval=31536000 \
-    $KIOSK_URL
+    --user-data-dir=/root/.config/chromium \
+    $KIOSK_URL &
+  
+  # Instance 2: DSI (Secondary 800x1280, Offset +1920)
+  # Uses separate user data dir to allow simultaneous run
+  sleep 1
+  chromium --kiosk --no-sandbox --test-type --ignore-gpu-blocklist \
+    --enable-gpu-rasterization --enable-zero-copy --disable-infobars \
+    --window-position=1920,0 --window-size=800,1280 \
+    --check-for-update-interval=31536000 \
+    --user-data-dir=/root/.config/chromium-dsi \
+    $KIOSK_URL &
+    
+  wait
   sleep 5
 done
 EOF
