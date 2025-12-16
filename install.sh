@@ -14,7 +14,9 @@ echo ""
 # 1. Inputs HARDCODED for Automation
 CTID=202
 PASSWORD="cd970fc1c5"
-KIOSK_URL="https://ha.soporte101.com"
+KIOSK_URL="http://172.16.10.12:8123"
+MOBILE_USER_AGENT="Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36"
+MOBILE_SCALE_FACTOR="1.3"
 
 # Check if CTID exists (and destroy if it does, since we are recreating)
 if pct status $CTID &>/dev/null; then
@@ -104,7 +106,7 @@ sleep 10
 # 6. Install Dependencies
 echo -e "\n${GREEN}--> Installing Kiosk Packages (this may take a while)...${NC}"
 pct exec $CTID -- apt update
-pct exec $CTID -- bash -c "DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends xorg openbox chromium chromium-l10n xserver-xorg-input-libinput xserver-xorg-input-evdev dbus-x11 xserver-xorg-video-intel"
+pct exec $CTID -- bash -c "DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends xorg openbox chromium chromium-l10n xserver-xorg-input-libinput xserver-xorg-input-evdev dbus-x11 xserver-xorg-video-intel xinput"
 
 # 7. Push Config Files (from local files in same dir as script)
 echo -e "\n${GREEN}--> Configuring Xorg & Systemd...${NC}"
@@ -123,6 +125,12 @@ echo 'EndSection' >> $OUTPUT
 
 CORE_KBD_SET=0
 CORE_PTR_SET=0
+INPUT_DEVS=""
+
+# Helper function to add to list
+add_dev() {
+    INPUT_DEVS="$INPUT_DEVS $1"
+}
 
 CURRENT_NAME=""
 while read -r line; do
@@ -147,22 +155,25 @@ while read -r line; do
 
             # 1. Touchscreen
             if [[ "$CURRENT_NAME" =~ "Touch" ]] || [[ "$CURRENT_NAME" =~ "touch" ]]; then
+               ID="Touch_${EVENT_ID}"
                echo "" >> $OUTPUT
                echo "Section \"InputDevice\"" >> $OUTPUT
-               echo "    Identifier \"Touch_${EVENT_ID}\"" >> $OUTPUT
+               echo "    Identifier \"$ID\"" >> $OUTPUT
                echo "    Driver \"evdev\"" >> $OUTPUT
                echo "    Option \"Device\" \"$DEVICE_PATH\"" >> $OUTPUT
                echo "    Option \"GrabDevice\" \"True\"" >> $OUTPUT
                echo "    Option \"SendCoreEvents\" \"True\"" >> $OUTPUT
                echo "EndSection" >> $OUTPUT
+               add_dev "$ID"
                IS_TOUCH=1
             fi
 
             # 2. Keyboard
-            if [[ "$HANDLERS" =~ "kbd" ]]; then
+            if [[ "$HANDLERS" =~ "kbd" ]] && [ $IS_TOUCH -eq 0 ]; then
+               ID="Keyboard_${EVENT_ID}"
                echo "" >> $OUTPUT
                echo "Section \"InputDevice\"" >> $OUTPUT
-               echo "    Identifier \"Keyboard_${EVENT_ID}\"" >> $OUTPUT
+               echo "    Identifier \"$ID\"" >> $OUTPUT
                echo "    Driver \"evdev\"" >> $OUTPUT
                echo "    Option \"Device\" \"$DEVICE_PATH\"" >> $OUTPUT
                echo "    Option \"XkbLayout\" \"us\"" >> $OUTPUT
@@ -174,13 +185,15 @@ while read -r line; do
                    echo "    Option \"SendCoreEvents\" \"True\"" >> $OUTPUT
                fi
                echo "EndSection" >> $OUTPUT
+               add_dev "$ID"
             fi
 
             # 3. Mouse
             if [[ "$HANDLERS" =~ "mouse" ]] && [ $IS_TOUCH -eq 0 ]; then
+               ID="Mouse_${EVENT_ID}"
                echo "" >> $OUTPUT
                echo "Section \"InputDevice\"" >> $OUTPUT
-               echo "    Identifier \"Mouse_${EVENT_ID}\"" >> $OUTPUT
+               echo "    Identifier \"$ID\"" >> $OUTPUT
                echo "    Driver \"evdev\"" >> $OUTPUT
                echo "    Option \"Device\" \"$DEVICE_PATH\"" >> $OUTPUT
                echo "    Option \"GrabDevice\" \"True\"" >> $OUTPUT
@@ -191,10 +204,26 @@ while read -r line; do
                    echo "    Option \"SendCoreEvents\" \"True\"" >> $OUTPUT
                fi
                echo "EndSection" >> $OUTPUT
+               add_dev "$ID"
             fi
         fi
     fi
 done < /proc/bus/input/devices
+
+# Generate ServerLayout
+echo "" >> $OUTPUT
+echo 'Section "Screen"' >> $OUTPUT
+echo '    Identifier "Screen0"' >> $OUTPUT
+echo '    Device "Intel Graphics"' >> $OUTPUT
+echo 'EndSection' >> $OUTPUT
+echo "" >> $OUTPUT
+echo 'Section "ServerLayout"' >> $OUTPUT
+echo '    Identifier "Default Layout"' >> $OUTPUT
+echo '    Screen "Screen0"' >> $OUTPUT
+for dev in $INPUT_DEVS; do
+    echo "    InputDevice \"$dev\"" >> $OUTPUT
+done
+echo 'EndSection' >> $OUTPUT
 EOF
 pct exec $CTID -- chmod +x /usr/local/bin/detect_inputs.sh
 pct exec $CTID -- /usr/local/bin/detect_inputs.sh
@@ -219,16 +248,21 @@ xset s noblank
 xrandr --output HDMI1 --auto --primary --output DSI1 --auto --right-of HDMI1 2>/dev/null || true
 
 # Fix Touchscreen mapping to DSI1 (Integrated screen)
-# Wait a bit for X to settle inputs or just run it. xinput should be ready.
-# We grep for our generated Identifier "Touch_eventX"
-TOUCH_DEV=$(xinput list --name-only 2>/dev/null | grep "Touch_" | head -n 1)
-if [ ! -z "$TOUCH_DEV" ]; then
-    xinput map-to-output "$TOUCH_DEV" DSI1 2>/dev/null || true
-fi
+# Retry up to 10 times because Xinput devices might take a moment to appear
+for i in {1..10}; do
+    TOUCH_DEV=\$(xinput list --name-only 2>/dev/null | grep "Touch_" | head -n 1)
+    if [ ! -z "\$TOUCH_DEV" ]; then
+        if xinput map-to-output "\$TOUCH_DEV" DSI1 2>/dev/null; then
+            echo "Mapped \$TOUCH_DEV to DSI1" >> /tmp/xinitrc_log
+            break
+        fi
+    fi
+    sleep 1
+done
 
 # Start DBus session
-if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
-    eval $(dbus-launch --sh-syntax --exit-with-session)
+if [ -z "\$DBUS_SESSION_BUS_ADDRESS" ]; then
+    eval \$(dbus-launch --sh-syntax --exit-with-session)
 fi
 
 openbox-session &
@@ -254,6 +288,8 @@ while true; do
     --window-position=1920,0 --window-size=800,1280 \
     --check-for-update-interval=31536000 \
     --user-data-dir=/root/.config/chromium-dsi \
+    --user-agent="$MOBILE_USER_AGENT" \
+    --force-device-scale-factor="$MOBILE_SCALE_FACTOR" \
     $KIOSK_URL &
     
   wait

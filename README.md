@@ -133,6 +133,8 @@ EndSection
 
 ### Static Input Configuration (Crucial for LXC)
 Since `udev` is unreliable in containers for input discovery, we must manually configure Xorg to look for the specific event files using the `evdev` driver.
+**Important:** When `AutoAddDevices` is False, Xorg ignores devices unless they are explicitly added to a `ServerLayout`.
+
 **File: `/etc/X11/xorg.conf.d/10-input.conf`**
 ```text
 Section "ServerFlags"
@@ -144,32 +146,96 @@ Section "InputDevice"
     Driver "evdev"
     Option "Device" "/dev/input/event3"  # Identified via ls -l /dev/input/by-id/
     Option "XkbLayout" "us"
+    Option "GrabDevice" "True"
+    Option "CoreKeyboard"
 EndSection
 
 Section "InputDevice"
     Identifier "Mouse0"
     Driver "evdev"
     Option "Device" "/dev/input/event3" # Logitech K400 uses same event for both
+    Option "GrabDevice" "True"
+    Option "CorePointer"
+EndSection
+
+Section "InputDevice"
+    Identifier "Touch0"
+    Driver "evdev"
+    Option "Device" "/dev/input/event7"
+    Option "GrabDevice" "True"
+    Option "SendCoreEvents" "True"
+EndSection
+
+Section "Screen"
+    Identifier "Screen0"
+    Device "Intel Graphics"
+EndSection
+
+Section "ServerLayout"
+    Identifier "Default Layout"
+    Screen "Screen0"
+    InputDevice "Keyboard0"
+    InputDevice "Mouse0"
+    InputDevice "Touch0"
 EndSection
 ```
 
 ### Kiosk Script (`/root/.xinitrc`)
 Loop to keep Chromium alive and disable screen blanking.
 **Important:** Use `dbus-launch` to prevent Chromium crashes.
+**Dual Monitor Support:** Configured for HDMI (Primary) and DSI (Secondary/Extended).
+
 ```bash
 #!/bin/bash
 xset s off
 xset -dpms
 xset s noblank
 
-# Start DBus session for Chromium
+# Auto-configure generic dual EXTENDED if HDMI+DSI present
+xrandr --output HDMI1 --auto --primary --output DSI1 --auto --right-of HDMI1 2>/dev/null || true
+
+# Fix Touchscreen mapping to DSI1 (Integrated screen)
+for i in {1..10}; do
+    TOUCH_DEV=$(xinput list --name-only 2>/dev/null | grep "Touch_" | head -n 1)
+    if [ ! -z "$TOUCH_DEV" ]; then
+        xinput map-to-output "$TOUCH_DEV" DSI1 2>/dev/null && break
+    fi
+    sleep 1
+done
+
+# Start DBus session
 if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
     eval $(dbus-launch --sh-syntax --exit-with-session)
 fi
 
 openbox-session &
+
+# Clean legacy locks
+rm -rf /root/.config/chromium/Singleton*
+rm -rf /root/.config/chromium-dsi/Singleton*
+
 while true; do
-  chromium --kiosk --no-sandbox --test-type --ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy --disable-infobars --window-position=0,0 --window-size=1920,1080 --check-for-update-interval=31536000 https://ha.soporte101.com
+  # Instance 1: HDMI (Primary 1920x1080)
+  chromium --kiosk --no-sandbox --test-type --ignore-gpu-blocklist \
+    --enable-gpu-rasterization --enable-zero-copy --disable-infobars \
+    --window-position=0,0 --window-size=1920,1080 \
+    --check-for-update-interval=31536000 \
+    --user-data-dir=/root/.config/chromium \
+    http://172.16.10.12:8123 &
+  
+  # Instance 2: DSI (Secondary 800x1280, Offset +1920)
+  # Uses separate user data dir to allow simultaneous run
+  sleep 1
+  chromium --kiosk --no-sandbox --test-type --ignore-gpu-blocklist \
+    --enable-gpu-rasterization --enable-zero-copy --disable-infobars \
+    --window-position=1920,0 --window-size=800,1280 \
+    --check-for-update-interval=31536000 \
+    --user-data-dir=/root/.config/chromium-dsi \
+    --user-agent="Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36" \
+    --force-device-scale-factor="1.3" \
+    http://172.16.10.12:8123 &
+    
+  wait
   sleep 5
 done
 ```
